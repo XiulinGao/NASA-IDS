@@ -1,0 +1,457 @@
+---
+title: "FATES-WRF-fuel-couple-processing"
+author: "Xiulin Gao"
+date: "2025-02-18"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+
+home_path   = path.expand("~")
+main_path   = file.path("/Volumes/Ldian/FATES/patchfuel")
+file_name   = "fuel-histfield-test_CLM_FATES.clm2.nc"
+file_path   = file.path(main_path,file_name)
+util_path   = file.path(home_path,"Util/RUtils")
+ncase       = length(file_name)
+case_names  = c("patch-fuel-test")
+file_desc   = "PatchFuel"
+
+
+```
+
+
+
+
+```{r LitterDecompSettting}
+
+## set up the fraction of biomass get distributed into different fuel pools
+ 
+CWD_Frac = c(0.045, 0.075, 0.21, 0.67) # for twig, small branch, large branch, and trunk fuel respectively
+CWD_pool = fuelinfo$short[1:4]
+
+```
+
+
+
+
+```{r UserInfo}
+
+user_fuelinfo = TRUE
+
+n               = 0
+fuelinfo        = list()
+n               = n + 1
+fuelinfo[[n]]   = list( id      = 1
+                      , key     = "fuel1"
+                      , short   = "Twig"
+                      , desc    = "Fuel from twig" 
+                      , colour  = "#E69F00"
+                      , parse   = "F*u*e*l[T*w*i*g]")
+n               = n + 1
+fuelinfo[[n]]   = list( id      = 2
+                      , key     = "fuel2"
+                      , short   = "SBranch"
+                      , desc    = "Fuel from small branch" 
+                      , colour  = "#56B4E9"
+                      , parse   = "F*u*e*l[S*b*r*a*n*c*h]")
+n               = n + 1
+fuelinfo[[n]]   = list( id      = 3
+                      , key     = "fuel3"
+                      , short   = "LBranch"
+                      , desc    = "Fuel from large branch" 
+                      , colour  = "#0072B2"
+                      , parse   = "F*u*e*l[L*b*r*a*n*c*h]")
+n               = n + 1
+fuelinfo[[n]]   = list( id      = 4
+                      , key     = "fuel4"
+                      , short   = "Trunk"
+                      , desc    = "Fuel from trunk" 
+                      , colour  = "#D55E00"
+                      , parse   = "F*u*e*l[T*r*u*n*k]")
+n               = n + 1
+fuelinfo[[n]]   = list( id      = 5
+                      , key     = "fuel5"
+                      , short   = "DeadLeaf"
+                      , desc    = "Fuel from dead leaf" 
+                      , colour  = "#999999"
+                      , parse   = "F*u*e*l[D*l*e*a*f]")
+n               = n + 1
+fuelinfo[[n]]   = list( id      = 6
+                      , key     = "fuel6"
+                      , short   = "LiveGrass"
+                      , desc    = "Fuel from live grass" 
+                      , colour  = "#009E73"
+                      , parse   = "F*u*e*l[L*g*r*a*s*s]") #end of fuel list
+
+```
+
+
+
+```{r LoadEverything, echo=FALSE}
+
+source(file.path(util_path,"load.everything.r"),chdir=TRUE)
+
+```
+
+
+```{r TimeDimension}
+nc_conn      = nc_open(file_path[1])
+time_val     = ncvar_get(nc_conn,"time")
+s_t          = 1
+e_t          = 60
+start_y      = 2000
+end_y        = 2005
+fst          = 2000
+lst          = 2001
+model_yra    = 2000
+time_use     = time_val[s_t:e_t]
+simu_time    = c(start_y:end_y)
+n_yr         = round((tail(time_use,1)-head(time_use,1))/365,digits=0)
+yr_start     = model_yra + floor(time_use[1]/365)
+yr_end       = yr_start + n_yr-1
+nc_year      = as.numeric(yr_start:yr_end)
+nc_month     = as.numeric(1:12)
+yr_each      = rep(nc_year,each=12)
+month_each   = rep(nc_month, times=n_yr)
+each_tstamp  = make_datetime(year=yr_each,month=month_each,day=1L)
+ntstamp_each = length(each_tstamp)
+dummy        = nc_close(nc_conn)
+
+
+```
+
+
+```{r VarToRead}
+
+read_nclist = c("FATES_LEAFC_AP", "FATES_SAPWC_ABOVEGROUND_AP",
+                "FATES_STRUC_ABOVEGROUND_AP","FATES_FUEL_AMOUNT_APFC",
+                "FATES_WOODC_ABOVEGROUND_AP")
+n_read  = length(read_nclist)
+
+var_low = str_remove_all(read_nclist, pattern="_APFC")
+var_low = tolower(str_remove_all(var_low,pattern="_AP"))
+
+fatesvar_new  = fatesvar                      %>% 
+                filter(vnam %in% var_low)
+nfatesvar_new = length(fatesvar_new$vnam)
+
+is_ap = grepl(pattern="_AP$",x=read_nclist)
+is_apfc = grepl(pattern="_APFC$",x=read_nclist)
+var_ap = read_nclist[is_ap]
+var_apfc = read_nclist[is_apfc]
+n_byage = length(var_ap)
+n_byapfc = length(var_apfc)
+
+```
+
+
+
+
+```{r DimensitionInfo}
+
+read_age = TRUE
+read_fuel= TRUE
+
+nc_dlist <- list()
+nc_vlist <- list()
+
+nc_conn  = nc_open(filename=file_path[1])
+nc_nvars = nc_conn$nvars
+nc_ndims = nc_conn$ndims
+nc_dlist = rep(NA_character_,times=nc_ndims)
+nc_vlist = rep(NA_character_,times=nc_nvars)
+for (d in sequence(nc_ndims)) nc_dlist[d] = nc_conn$dim[[d]]$name
+for (v in sequence(nc_nvars)) nc_vlist[v] = nc_conn$var[[v]]$name
+
+
+# List of age classes
+if(read_age){
+idxage   = match("fates_levage",nc_dlist)
+if (is.finite(idxage)){
+   ages     = nc_conn$dim[[idxage]]$vals
+   nages    = nc_conn$dim[[idxage]]$len
+
+   ageinfo  = tibble( id      = sequence(nages)
+                    , age_lwr = ages
+                    , age_upr = c(ages[-1],Inf)
+                    , key     = sprintf("age_%3.3i",ages)
+                    , desc    = c( paste0("paste(paste(",age_lwr[-nages],"<= A*g*e)<",age_upr[-nages],"*y*r)")
+                                 , paste0("paste( A*g*e >=",age_upr[nages],"*y*r)")
+                                 )#end c
+                    , labs    = c( paste0("paste(",age_lwr[-nages],"-",age_upr[-nages],")")
+                                 , paste0("paste(",age_lwr[ nages],"-infinity)")
+                                 )#end c
+                    , colour  = viridis(nages,option="D",direction=-1)
+                    )#end tibble
+}else{
+   ageinfo  = tibble( id      = integer(0L)
+                    , age_lwr = numeric(0L)
+                    , age_upr = numeric(0L)
+                    , key     = character(0L)
+                    , desc    = character(0L)
+                    , labs    = character(0L)
+                    , colour  = character(0L)
+                    )#end tibble
+}#end if (is.na(idxage))
+
+# Set number of age classes
+nages = nrow(ageinfo)
+}
+
+
+if(read_fuel){
+idxfuel   = match("fates_levfuel",nc_dlist)
+if (! is.finite(idxfuel)){
+   # fuel index not found. Skip Fuels altogether.
+   fuelinfo = tibble( id               = numeric(0L)
+                    , key              = character(0L)
+                    , short            = character(0L)
+                    , desc             = character(0L)
+                    , colour           = character(0L)
+                    , stringsAsFactors = FALSE
+                    )#end data.table
+}else if (! user_fuelinfo){
+   # Select all fuels available
+   fuelids  = nc_conn$dim[[idxfuel]]$vals
+   nfuelids = nc_conn$dim[[idxfuel]]$len
+
+   # Build tibble with all the fuels.
+   fuelinfo = tibble( id               = fuelids
+                    , key              = sprintf("Fuel %2.2i" ,fuelids)
+                    , short            = sprintf("Fuel %2.2i" ,fuelids)
+                    , desc             = sprintf("Fuel %2.2i" ,fuelids)
+                    , colour           = brewer.pal(n=nfuelids,name="PuBuGn")
+                    , stringsAsFactors = FALSE
+                   )#end tibble
+}else if (! is_tibble(fuelinfo)){
+   # Convert user-defined fuelinfo to a "tibble" object
+   fuelinfo  = do.call(what=rbind,args=lapply(X=fuelinfo,FUN=as_tibble,stringsAsFactors=FALSE))
+}#end if (! is.finite(idxfuel))
+nfuels = nrow(fuelinfo)
+}
+
+## labels for variables by patch age x fuel class
+apfc_key = expand.grid(ageinfo$key, fuelinfo$key)
+apfc_key = paste0(apfc_key$Var1,"-",apfc_key$Var2)
+
+
+
+if(read_age){
+#by age class
+byage = list()
+for(c in sequence(ncase)){
+  case     = as.character(case_names[c])
+  
+  for(a in sequence(n_byage)){
+  nc_nvnow                   = var_ap[a]
+  nc_pref                    = tolower(gsub(pattern="_AP$",replacement="",x=nc_nvnow))
+  f                          = match(nc_pref,fatesvar_new$vnam)
+  f_vnam                     = fatesvar_new$vnam[f]
+  byage[[case]][[f_vnam]] = matrix(data=NA_real_,nrow=ntstamp_each,ncol=nages,dimnames=list(NULL,ageinfo$key)) 
+  } #end of a loop
+} #end of c(in sequence(ncase))
+}
+
+
+# Initialize list of variables by patch age x fuel class
+if(read_fuel){
+byapfc = list()
+for(c in sequence(ncase)){
+  case     = as.character(case_names[c])
+  
+  for(f in sequence(n_byapfc)){
+  nc_nvnow                   = var_apfc[f]
+  nc_pref                    = tolower(gsub(pattern="_APFC$",replacement="",x=nc_nvnow))
+  f                          = match(nc_pref,fatesvar_new$vnam)
+  f_vnam                     = fatesvar_new$vnam[f]
+  byapfc[[case]][[f_vnam]] = matrix(data=NA_real_,nrow=ntstamp_each,ncol=nfuels*nages,dimnames=list(NULL,apfc_key)) 
+  } #end of a loop
+} #end of c(in sequence(ncase))
+}
+
+```
+
+
+
+```{r ReadData, echo=FALSE}
+
+for(c in sequence(ncase)){
+  case = case_names[c]
+  nc_conn = nc_open(file_path[c])
+  for (n in sequence(n_read)){
+  var_now = read_nclist[n]
+  ap_now  = is_ap[n]
+  nc_pref = gsub(pattern="_AP$",replacement="",x=var_now)
+  nc_pref = tolower(gsub(pattern="_APFC$",replacement="",x=nc_pref))
+  f       = match(nc_pref,fatesvar_new$vnam)
+  f_vnam  = fatesvar_new$vnam[f]
+  f_add0  = eval(parse(text=fatesvar_new$add0[f]))
+  f_mult  = eval(parse(text=fatesvar_new$mult[f]))
+  nc_dat  = ncvar_get(nc=nc_conn,varid=var_now,collapse_degen = TRUE)
+  nc_dat  = nc_dat[,s_t:e_t] 
+  ncm_dat = aperm(nc_dat,c(2,1))
+  nc_dat  = f_add0 + f_mult * ncm_dat
+
+  if(ap_now){
+    byage[[case]][[f_vnam]][] = nc_dat
+  }else{
+    byapfc[[case]][[f_vnam]][]= nc_dat
+  }
+
+  }
+  dummy   = nc_close(nc_conn)
+
+}
+
+
+
+
+```
+
+
+
+```{r MeltData}
+
+cat0(" + Turn age-dependent matrices into tibble objects.")
+age_melt  = NULL
+
+for (c in sequence(ncase)){
+  case = case_names[c]
+  now_agemelt = NULL
+  for (a in sequence(n_byage)){
+   #--- Match variables.
+  f        = match(names(byage[[case]])[a],fatesvar_new$vnam)
+  f_vnam   = fatesvar_new$vnam[f]
+  f_desc   = fatesvar_new$desc[f]
+  cat0("   - ",f_desc,".")
+      
+#--- Create molten data table for this variable.  
+  now_age           = as_tibble(byage[[case]][[f_vnam]])
+  now_age$time      = each_tstamp
+  now_age$case      = rep_along(time, x = case)
+  now_melt          = as_tibble(reshape2::melt(data=now_age,id.vars=c("case",       
+                              "time"),variable.name="age",value.name=f_vnam))
+      #--- Merge data table
+  
+  if (is.null(now_agemelt)){
+    now_agemelt = now_melt
+  }else{
+        now_agemelt = now_agemelt %>% left_join(now_melt, by=c("case","time","age"))
+  }#end if (is.null(age_melt))
+  
+  }#end for (a in sequence(nbyage))
+age_melt = rbind(age_melt,now_agemelt)
+}
+
+
+
+byage = age_melt 
+rm(age_melt)
+
+
+
+cat0(" + Turn Age x fuel matrices into tibble objects.")
+apfc_melt  = NULL
+
+for (c in sequence(ncase)){
+  case = case_names[c]
+  now_apfcmelt = NULL
+  for (u in sequence(n_byapfc)){
+   #--- Match variables.
+  f        = match(names(byapfc[[case]])[u],fatesvar_new$vnam)
+  f_vnam   = fatesvar_new$vnam[f]
+  f_desc   = fatesvar_new$desc[f]
+  cat0("   - ",f_desc,".")
+      
+#--- Create molten data table for this variable.  
+  now_apfc            = as_tibble(byapfc[[case]][[f_vnam]])
+  now_apfc$time       = each_tstamp
+  now_apfc$case       = rep_along(time, x = case)
+  now_melt            = as_tibble(reshape2::melt(data=now_fuel,id.vars=c("case",      
+                              "time"),variable.name="age_fuel",value.name=f_vnam))
+      #--- Merge data table
+  
+  if (is.null(now_apfcmelt)){
+    now_apfcmelt = now_melt
+  }else{
+      
+        now_apfcmelt = now_apfcmelt %>% left_join(now_melt, by=c("case","time","age_fuel"))
+  }#end if (is.null(age_melt))
+  
+  }#end for (a in sequence(nbyage))
+apfc_melt = rbind(apfc_melt,now_apfcmelt)
+}
+
+
+
+byapfc = apfc_melt 
+rm(apfc_melt)
+
+
+
+## write out tables so can use later
+fwrite(byage,file.path(main_path,paste0(file_desc,"_byage.csv")))
+fwrite(byapfc,file.path(main_path,paste0(file_desc,"_byapfc.csv")))
+
+
+```
+
+
+
+
+```{r ConvertLiveBiomassToFuels}
+
+## Assumption: twigs are all 10h fuels, small + large branches are 100h fuels
+## trunk is 1000h fuel
+
+fuel_bysz = byage                          %>% 
+            group_by(case,age)             %>% 
+            dplyr::select(-time)           %>% 
+            summarize_all(mean,na.rm=TRUE) %>% 
+            ungroup()
+
+fuel_bysz = fuel_bysz                                                                           %>% 
+            mutate(total_cwd = fates_sapwc_aboveground + fates_struc_aboveground,
+                   live_woody= fates_leafc + fates_sapwc_aboveground + fates_struc_aboveground) %>% 
+            mutate(hour1_live    = fates_leafc,
+                   hour10_live   = total_cwd * CWD_Frac[1],
+                   hour100_live  = total_cwd * (CWD_Frac[2] + CWD_Frac[3]),
+                   hour1000_live = total_cwd * CWD_Frac[4])
+
+
+litter_bysz = byapfc                             %>% 
+              group_by(case,age_fuel)            %>% 
+              dplyr::select(-time)               %>% 
+              summarize_all(mean,na.rm=TRUE)     %>% 
+              ungroup()
+litter_bysz = litter_bysz                         %>% 
+              mutate(age = substr(age_fuel,1,7),
+                     fuel = substr(age_fuel,9,13)) %>% 
+              group_by(age)                        %>% 
+              mutate(hour1     = fates_fuel_amount[fuel=="fuel5"],
+                     hour10    = fates_fuel_amount[fuel=="fuel1"],
+                     hour100   = fates_fuel_amount[fuel=="fuel2"] + fates_fuel_amount[fuel=="fuel3"],
+                     hour1000  = fates_fuel_amount[fuel=="fuel4"],
+                     live_herb = fates_fuel_amount[fuel=="fuel6"]) %>% 
+             ungroup()
+
+litter_bysz = litter_bysz                           %>%  
+              dplyr::select(case,age,hour1,hour10,hour100,hour1000,live_herb) %>% 
+              distinct()
+
+fuel_bysz = fuel_bysz                             %>% 
+            dplyr::select(case,age,live_woody)    
+fuel_bysz = fuel_bysz %>% left_join(litter_bysz,by=c("case","age"))
+
+##write out
+fwrite(fuel_bysz,file.path(main_path,paste0(file_desc,"_fueltab.csv")))
+
+
+```
+
+
+
+```{r MapToFuelModel}
+
+```
+
