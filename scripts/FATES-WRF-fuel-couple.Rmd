@@ -8,26 +8,14 @@ output: html_document
 ```{r setup, include=FALSE}
 
 home_path   = path.expand("~")
-main_path   = file.path("/Volumes/Ldian/FATES/patchfuel")
-file_name   = "fuel-histfield-test_CLM_FATES.clm2.nc"
+main_path   = file.path("/Volumes/Ldian/FATES/bldgt-fuel-spinup")
+file_name   = "blodgett-invent-spinup_CLM_FATES.clm2.nc"
 file_path   = file.path(main_path,file_name)
 util_path   = file.path(home_path,"Util/RUtils")
 ncase       = length(file_name)
 case_names  = c("patch-fuel-test")
 file_desc   = "PatchFuel"
 
-
-```
-
-
-
-
-```{r LitterDecompSettting}
-
-## set up the fraction of biomass get distributed into different fuel pools
- 
-CWD_Frac = c(0.045, 0.075, 0.21, 0.67) # for twig, small branch, large branch, and trunk fuel respectively
-CWD_pool = fuelinfo$short[1:4]
 
 ```
 
@@ -86,6 +74,49 @@ fuelinfo[[n]]   = list( id      = 6
 ```
 
 
+```{r Constants}
+tonnes_acre_to_kg_m2 = 0.2241701
+
+```
+
+
+
+```{r FuelModel}
+fuel_model = fread("~/NASA-IDS/data/anderson-fuel-models.csv")
+
+# conver fuel load from tons/acer to kgC / m2
+fm         =  fuel_model                      %>% 
+              group_by(model, fuel_complex)   %>% 
+              mutate_all(.funs = ~.*tonnes_acre_to_kg_m2*0.45) %>% 
+              mutate_all( ~ round(.x,2))      %>% 
+              ungroup()                       %>% 
+              dplyr::select(hour1,hour10,hour100,live)
+fm_df = as.data.frame(fm)
+fmod_nams = sprintf("FM-%i",c(1:13))
+rownames(fm_df) = fmod_nams
+                  
+        
+
+```
+
+
+
+
+```{r LitterDecompSettting}
+
+## set up the fraction of biomass get distributed into different fuel pools
+ 
+CWD_Frac = c(0.045, 0.075, 0.21, 0.67) # for twig, small branch, large branch, and trunk fuel respectively
+CWD_pool = fuelinfo$short[1:4]
+
+```
+
+
+
+
+
+
+
 
 ```{r LoadEverything, echo=FALSE}
 
@@ -98,12 +129,12 @@ source(file.path(util_path,"load.everything.r"),chdir=TRUE)
 nc_conn      = nc_open(file_path[1])
 time_val     = ncvar_get(nc_conn,"time")
 s_t          = 1
-e_t          = 60
-start_y      = 2000
-end_y        = 2005
-fst          = 2000
-lst          = 2001
-model_yra    = 2000
+e_t          = 1200
+start_y      = 1900
+end_y        = 1999
+fst          = 1900
+lst          = 1999
+model_yra    = 1900
 time_use     = time_val[s_t:e_t]
 simu_time    = c(start_y:end_y)
 n_yr         = round((tail(time_use,1)-head(time_use,1))/365,digits=0)
@@ -126,6 +157,7 @@ dummy        = nc_close(nc_conn)
 read_nclist = c("FATES_LEAFC_AP", "FATES_SAPWC_ABOVEGROUND_AP",
                 "FATES_STRUC_ABOVEGROUND_AP","FATES_FUEL_AMOUNT_APFC",
                 "FATES_WOODC_ABOVEGROUND_AP")
+read_nclist = c("FATES_FUEL_AMOUNT_APFC")
 n_read  = length(read_nclist)
 
 var_low = str_remove_all(read_nclist, pattern="_APFC")
@@ -367,7 +399,7 @@ for (c in sequence(ncase)){
   now_apfc            = as_tibble(byapfc[[case]][[f_vnam]])
   now_apfc$time       = each_tstamp
   now_apfc$case       = rep_along(time, x = case)
-  now_melt            = as_tibble(reshape2::melt(data=now_fuel,id.vars=c("case",      
+  now_melt            = as_tibble(reshape2::melt(data=now_apfc,id.vars=c("case",      
                               "time"),variable.name="age_fuel",value.name=f_vnam))
       #--- Merge data table
   
@@ -447,11 +479,54 @@ fuel_bysz = fuel_bysz %>% left_join(litter_bysz,by=c("case","age"))
 fwrite(fuel_bysz,file.path(main_path,paste0(file_desc,"_fueltab.csv")))
 
 
+
+fates_fuel = fuel_bysz                                  %>% 
+             group_by(case,age)                         %>% 
+             mutate(live = live_woody + live_herb)      %>% 
+             select(case,age,hour1,hour10,hour100,live) %>% 
+             mutate_all( ~ round(.x,2))                 %>% 
+             ungroup()                                  %>% 
+             select(hour1,hour10,hour100,live)
+model_fuel = fates_fuel %>% dplyr::select(-c(case,age))
+model_fuel = model_fuel %>% filter(live!=0)
+
+
 ```
 
 
 
 ```{r MapToFuelModel}
+
+
+# 1. select best model based on similarity value
+fm_maps = proxy::simil(x = model_fuel, y = fm_df)
+fm_maps = as.matrix.data.frame(fm_maps)
+colnames(fm_maps) = fuel_model$model
+fm_maps = data.table(fm_maps)
+fm_maps[, best_model :=colnames(.SD)[max.col(.SD, ties.method = "first")]]
+fm_maps$case = fates_fuel$case
+fm_maps$age = fates_fuel$age
+
+# 2. similarity weighting factor
+sim_wgt = condvis2::similarityweight(x=fm_df,data=model_fuel,threshold=0.5,scale=F)
+sim_wgt = as_tibble(sim_wgt)
+sim_wgt = as.data.frame(sim_wgt)
+colnames(sim_wgt) = fates_fuel$age
+rownames(sim_wgt) = fmod_nams
+
+#threshold_fun = function(x){x=if_else(x>=0.5, x, 0)}
+scale_fun = function(x){x=x/sum(x,na.rm=TRUE)}
+#sim_wgt = sim_wgt          %>% 
+#          mutate_all(threshold_fun)
+wgt = sim_wgt                  %>% 
+          mutate_all(scale_fun)
+
+
+
+
+
+
+
 
 ```
 
