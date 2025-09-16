@@ -12,7 +12,8 @@ dec = 9L
 home_path = path.expand("~")
 data_path = file.path("~/NASA-IDS/data")
 fia_path = file.path(data_path,"CA-FIA")
-lemma_ba = data.table::fread("~/NASA-IDS/data/WRF-LiveBasalArea-Sierra_2017.csv")
+#lemma_ba = data.table::fread("~/NASA-IDS/data/WRF-LiveBasalArea-Sierra_2017.csv")
+lemma_ba = data.table::fread("~/NASA-IDS/data/WRF-LiveBasalArea-Sierra-CanCovMasked_2017.csv")
 
 sp_interest = c("ponderosa pine",
                 "lodgepole pine",
@@ -31,7 +32,25 @@ sp_interest = c("ponderosa pine",
                 "California live oak",
                 "interior live oak")
 
-yr_include = c(2008:2017)
+yr_include = c(2000:2017)
+
+#### helpler function ####
+assign_na = function(x){
+  x = ifelse(x>1000, NA, x)
+}
+
+replace_fun = function(idx, cn){
+  idx_safe = ifelse(idx %in% seq_along(cn), idx, NA_integer_)
+  cn[idx_safe]
+}
+rename_fun = function(x){
+  x = gsub(patter="X", replacement = "CN", x)
+}
+
+nth_baCN <- function(x, k) {
+  hits <- str_extract_all(x, "(?<=baCN)\\d+")
+  vapply(hits, function(v) if (length(v) >= k) as.integer(v[k]) else NA_integer_, 1L)
+}
 
 fia_ca = readFIA(fia_path)
 id = findEVALID(fia_ca, mostRecent = FALSE, year = yr_include)
@@ -185,7 +204,7 @@ tpa_byplot = tpa_byplot                                  %>%
 
 tree_df = tree_df %>% left_join(tpa_byplot, by=c("PLT_CN"))
 
-data.table::fwrite(tree_df, file.path(data_path,"fia-tree-data-filtered_2008-2017.csv"))
+data.table::fwrite(tree_df, file.path(data_path,"fia-tree-data-filtered-cancov-masked_2000-2017.csv"))
 
 ## search for the nearest plots for each WRF grid
 ## calculate mean BA of every two plots
@@ -204,17 +223,7 @@ nn_dis = nn_pt$nn.dists
 nn_idx = data.frame(nn_idx)
 nn_dis = data.frame(nn_dis)
 
-assign_na = function(x){
-  x = ifelse(x>1000, NA, x)
-}
 
-replace_fun = function(idx, cn){
-  idx_safe = ifelse(idx %in% seq_along(cn), idx, NA_integer_)
-  cn[idx_safe]
-}
-rename_fun = function(x){
-  x = gsub(patter="X", replacement = "CN", x)
-}
 
 nn_dis = nn_dis                  %>% 
          mutate_all( ~ assign_na(.))
@@ -242,14 +251,14 @@ lemma_ba = lemma_ba                                         %>%
 ## new column to store the mean BA for that pair
 
 ba_cols <- grep("^ba", names(lemma_ba), value = TRUE)
-pairs <- combn(ba_cols, 2, simplify = FALSE)
+combs <- combn(ba_cols, 5, simplify = FALSE)
 
-pair_means <- setNames(
-  as.data.frame(sapply(pairs, function(p) rowMeans(lemma_ba[, p], na.rm = TRUE))),
-  sapply(pairs, function(p) paste0("mean_", p[1], "_", p[2]))
+combs_means <- setNames(
+  as.data.frame(sapply(combs, function(p) rowMeans(lemma_ba[, p], na.rm = TRUE))),
+  sapply(combs, function(p) paste("mean",p[1],p[2],p[3],p[4],p[5],sep="_"))
 )
 
-lemma_ba = cbind (lemma_ba, pair_means)
+lemma_ba = cbind (lemma_ba, combs_means)
 
 relative_ba = function(x,ba){ifelse(is.na(x) | is.na(ba), NA_integer_, x/ba)}
 
@@ -260,7 +269,8 @@ lemma_ba = lemma_ba                     %>%
 lemma_ba = lemma_ba                        %>% 
            mutate(across(starts_with("rela"), ~ ifelse(.>= 0.9 & .<= 1.1, TRUE, FALSE)))
 
-subset_cols = grep("^rela_mean_baCN\\d+_baCN\\d+$", names(lemma_ba), value = TRUE)
+pat  = "^rela_mean(_baCN[0-9]+)+$"
+subset_cols = grep(pat, names(lemma_ba), value = TRUE)
 
 # 1. return pair where the first column has BA within range
 lemma_ba = lemma_ba %>%
@@ -278,10 +288,14 @@ lemma_ba = lemma_ba %>%
 # TO-DO: can directly compare mean distance to target 
 
 m      = regexec("baCN(\\d+)_baCN(\\d+)", subset_cols)
+m      = gregexpr("(?<=baCN)\\d+", subset_cols, perl = TRUE)
 parts  = regmatches(subset_cols, m)
-n1     = as.integer(vapply(parts, function(x) x[2], ""))
-n2     = as.integer(vapply(parts, function(x) x[3], ""))
-ord    = order(n1 + n2, n1, n2)
+n1     = as.integer(vapply(parts, function(x) x[1], ""))
+n2     = as.integer(vapply(parts, function(x) x[2], ""))
+n3     = as.integer(vapply(parts, function(x) x[3], ""))
+n4     = as.integer(vapply(parts, function(x) x[4], ""))
+n5     = as.integer(vapply(parts, function(x) x[5], ""))
+ord    = order(n1 + n2 + n3 + n4 + n5, n1, n2, n3, n4, n5)
 rank   = match(seq_along(subset_cols), ord)
 mat    = as.matrix(lemma_ba[subset_cols])
 storage.mode(mat) = "logical"
@@ -295,41 +309,81 @@ lemma_ba$lowest_true_col = apply(mat, 1, function(x) {
 
 ## store selected FIA plots
 
-lemma_ba$pair_CN1 = as.integer(sub("^.*baCN(\\d+)_baCN\\d+$", "\\1", lemma_ba$lowest_true_col))
-lemma_ba$pair_CN2 = as.integer(sub("^.*baCN(\\d+)$", "\\1", lemma_ba$lowest_true_col))
+#lemma_ba$pair_CN1 = as.integer(sub("^.*baCN(\\d+)_baCN\\d+$", "\\1", lemma_ba$lowest_true_col))
+#lemma_ba$pair_CN2 = as.integer(sub("^.*baCN(\\d+)$", "\\1", lemma_ba$lowest_true_col))
+lemma_ba = lemma_ba                   %>% 
+           mutate(comb_CN1 = nth_baCN(lowest_true_col, 1),
+                  comb_CN2 = nth_baCN(lowest_true_col, 2),
+                  comb_CN3 = nth_baCN(lowest_true_col, 3),
+                  comb_CN4 = nth_baCN(lowest_true_col, 4),
+                  comb_CN5 = nth_baCN(lowest_true_col, 5))
 lemma_ba = lemma_ba           %>% 
-           mutate(across(starts_with("pair"), ~ paste0("CN",.)))
+           mutate(across(starts_with("comb"), ~ paste0("CN",.)))
 
 ## replace with FIA CN number
-
 ba_cols <- grep("^CN\\d+$", names(lemma_ba), value = TRUE)
 ba_mat <- as.matrix(lemma_ba[ba_cols])
-col_idx1 <- match(lemma_ba$pair_CN1, ba_cols)
-col_idx2 =  match(lemma_ba$pair_CN2, ba_cols)
+col_idx1 <- match(lemma_ba$comb_CN1, ba_cols)
+col_idx2 =  match(lemma_ba$comb_CN2, ba_cols)
+col_idx3 =  match(lemma_ba$comb_CN3, ba_cols)
+col_idx4 =  match(lemma_ba$comb_CN4, ba_cols)
+col_idx5 =  match(lemma_ba$comb_CN5, ba_cols)
 row_idx <- seq_len(nrow(lemma_ba))
-lemma_ba$pair_CN1 <- ba_mat[cbind(row_idx, col_idx1)]
-lemma_ba$pair_CN2 <- ba_mat[cbind(row_idx, col_idx2)]
+lemma_ba$comb_CN1 <- ba_mat[cbind(row_idx, col_idx1)]
+lemma_ba$comb_CN2 <- ba_mat[cbind(row_idx, col_idx2)]
+lemma_ba$comb_CN3 <- ba_mat[cbind(row_idx, col_idx3)]
+lemma_ba$comb_CN4 <- ba_mat[cbind(row_idx, col_idx4)]
+lemma_ba$comb_CN5 <- ba_mat[cbind(row_idx, col_idx5)]
 
-lemma_ba = lemma_ba %>% dplyr::select(lon, lat, BA, lowest_true_col, pair_CN1, pair_CN2)
+lemma_ba = lemma_ba %>% dplyr::select(lon, lat, BA, lowest_true_col, 
+                                      comb_CN1, comb_CN2, comb_CN3, 
+                                      comb_CN4, comb_CN5)
+lemma_ba = data.frame(lemma_ba)
 
-final_set = lemma_ba                        %>% 
-              dplyr::select(-pair_CN2)     %>% 
-              rename(PLT_CN = pair_CN1)  %>% 
-              left_join(tree_df, 
-                        by = "PLT_CN")   %>% 
-              mutate(patch = "FIA_p1")
+final_set = lemma_ba                     %>% 
+            dplyr::select(lon,lat,BA,
+            lowest_true_col,comb_CN1)    %>% 
+            rename(PLT_CN = comb_CN1)    %>% 
+            left_join(tree_df, 
+            by = "PLT_CN")   %>% 
+            mutate(patch = "FIA_p1")
 
 final_set2 = lemma_ba                    %>% 
-             dplyr::select(-pair_CN1)    %>% 
-             rename(PLT_CN = pair_CN2)   %>% 
+             dplyr::select(lon,lat,BA,
+             lowest_true_col,comb_CN2)   %>% 
+             rename(PLT_CN = comb_CN2)   %>% 
              left_join(tree_df, 
                        by = "PLT_CN")    %>% 
              mutate(patch = "FIA_p2")
-final_set = rbind(final_set, final_set2)
+
+final_set3 = lemma_ba                    %>% 
+             dplyr::select(lon,lat,BA,
+             lowest_true_col,comb_CN3)   %>% 
+             rename(PLT_CN = comb_CN3)   %>% 
+             left_join(tree_df, 
+             by = "PLT_CN")              %>% 
+             mutate(patch = "FIA_p3")
+
+final_set4 = lemma_ba                    %>% 
+             dplyr::select(lon,lat,BA,
+             lowest_true_col,comb_CN4)   %>% 
+             rename(PLT_CN = comb_CN4)   %>% 
+             left_join(tree_df, 
+             by = "PLT_CN")              %>% 
+             mutate(patch = "FIA_p4")
+
+final_set5 = lemma_ba                    %>% 
+             dplyr::select(lon,lat,BA,
+             lowest_true_col,comb_CN5)   %>% 
+             rename(PLT_CN = comb_CN5)   %>% 
+             left_join(tree_df, 
+             by = "PLT_CN")              %>% 
+             mutate(patch = "FIA_p5")
+final_set = rbind(final_set, final_set2, final_set3, final_set4, final_set5)
 final_set$lon_f = format(final_set$lon,format="f",digits=dec)
 final_set$lat_f = format(final_set$lat,format="f",digits=dec)
 
-data.table::fwrite(final_set, file.path(data_path,"selected-FIA-plots-SierraOnWRF.csv"))
+data.table::fwrite(final_set, file.path(data_path,"selected-FIA-plots-SierraOnWRF_2000-2017-5plots.csv"))
 
 
 ## create initialization files for each target grids
@@ -357,14 +411,14 @@ wrf_grids = wrf_grids %>% left_join(final_set, by = c("lon_f","lat_f"))
 wrf_grids_subset = wrf_grids %>% filter(!is.na(lowest_true_col))
 wrf_grids_tomap = wrf_grids                       %>% 
                   filter(is.na(lowest_true_col))  %>% 
-                  select(-idx1)
+                  dplyr::select(-idx1)
 
 
 nn_pt3 = RANN::nn2(wrf_grids_subset[,1:2], wrf_grids_tomap[,1:2], k =1)
 nn_idx3 = setNames(data.frame(nn_pt3$nn.idx), c("idx1"))
 wrf_grids_tomap = cbind(wrf_grids_tomap, nn_idx3)
 wrf_grids_tomap = wrf_grids_tomap                   %>% 
-                  select(Longitude,
+                  dplyr::select(Longitude,
                          Latitude,
                          lon_wrf,lat_wrf,
                          lon_f,lat_f,
@@ -378,16 +432,16 @@ wrf_grids_tomap = wrf_grids_tomap                                   %>%
     lon_f = wrf_grids_subset$lon_f[idx1],
     lat_f = wrf_grids_subset$lat_f[idx1]
   )
-to_join = wrf_grids_subset %>% select(-c(Longitude,Latitude,plt_name,idx1,lon_wrf,lat_wrf))
+to_join = wrf_grids_subset %>% dplyr::select(-c(Longitude,Latitude,plt_name,idx1,lon_wrf,lat_wrf))
 wrf_grids_tomap = wrf_grids_tomap %>% left_join(to_join, by = c("lon_f","lat_f"))
 wrf_grids_tomap = wrf_grids_tomap           %>% 
-                  select(-c(lon_f, lat_f))  %>% 
+                  dplyr::select(-c(lon_f, lat_f))  %>% 
                   rename(lon_f = lon_f_org,
                          lat_f = lat_f_org)
 
 wrf_grids = rbind(wrf_grids_subset, wrf_grids_tomap)
-creek_wrf_grids = wrf_grids %>% select(Longitude,Latitude,lon_wrf,lat_wrf)
-data.table::fwrite(creek_wrf_grids, file.path(data_path,"creek-grids.csv"))
+creek_wrf_grids = wrf_grids %>% dplyr::select(Longitude,Latitude,lon_wrf,lat_wrf)
+data.table::fwrite(creek_wrf_grids, file.path(data_path,"creek-grids-5plots.csv"))
 
 plot_year = 2017
 
@@ -422,7 +476,7 @@ for(p in sequence(nplots)){
   patch_df$trk = rep(2, npatch)
   patch_df$age = rep(0, npatch)
   patch_df$area = rep((1/npatch), npatch)
-  patch_df = patch_df %>% select(time,patch, trk, age, area)
+  patch_df = patch_df %>% dplyr::select(time,patch, trk, age, area)
   write.table(patch_df, file.path(data_path,sprintf('%s_%i.pss',  plot_name, plot_year)), 
               row.names=FALSE, sep = " ")
   ### create css file (cohort structure)
@@ -432,8 +486,9 @@ for(p in sequence(nplots)){
   co_df$height = -1
   patch_size=plot_area * 10000 / npatch
   co_df$nplant = 1/patch_size
-  co_df = co_df %>% mutate(nplant = nplant*TPA_UNADJ) # multiply expansion factor to get stem density 
-  co_df = co_df %>% select(time, patch,dbh,height,pft,nplant)
+  co_df = co_df %>% mutate(nplant = nplant*TPA_UNADJ*0.5) # multiply expansion factor to get stem density for 1 acre 
+                                                          # and convert to 0.2 ha (patch size)
+  co_df = co_df %>% dplyr::select(time, patch,dbh,height,pft,nplant)
   co_df = co_df %>% mutate(dbh = round(dbh,2))
   write.table(co_df, file.path(data_path,sprintf('%s_%i.css', plot_name, plot_year)), 
               row.names=FALSE, sep = ' ')
@@ -442,7 +497,7 @@ for(p in sequence(nplots)){
 
 ## write the control text file for FATES 
 init_dir_derecho = "/glade/work/xiugao/fates-input/creek-fire/init/"
-ctrl_file = wrf_grids %>% select(Longitude,Latitude,lon_f,lat_f) %>% distinct()
+ctrl_file = wrf_grids %>% dplyr::select(Longitude,Latitude,lon_f,lat_f) %>% distinct()
 ctrl_file = ctrl_file                                       %>% 
             mutate(plot_name = paste0(lon_f,"_",lat_f),
                    plot_year = 2017,
@@ -453,9 +508,9 @@ ctrl_file = ctrl_file                                       %>%
                    #lon = 360 + lon,
                    type = 1)
 ctrl_file = ctrl_file                       %>% 
-            select(type,Latitude,
+            dplyr::select(type,Latitude,
                    Longitude,
                    pss_path, css_path)      %>%
             rename_all(toupper)
-write.table(ctrl_file, file.path(data_path,"creek-init-ctrl-sametype.txt"),row.names = FALSE,quote=FALSE)
+write.table(ctrl_file, file.path(data_path,"creek-init-ctrl-5plot.txt"),row.names = FALSE,quote=FALSE)
 
