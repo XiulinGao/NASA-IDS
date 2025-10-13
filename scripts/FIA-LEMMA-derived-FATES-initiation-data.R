@@ -8,6 +8,7 @@ library(tidyverse)
 ft2acre_2_m2ha = 0.23
 inch_2_cm = 2.54
 acre_2_ha = 0.405
+tonac_2_kgsqm = 0.224
 dec = 9L
 home_path = path.expand("~")
 data_path = file.path("~/NASA-IDS/data")
@@ -31,6 +32,7 @@ sp_interest = c("ponderosa pine",
                 "California black oak",
                 "California live oak",
                 "interior live oak")
+fc_interest = c("LITTER","1HR","10HR","100HR","1000HR")
 
 yr_include = c(2000:2017)
 
@@ -60,6 +62,18 @@ fia_recent = clipFIA(fia_2017, mostRecent = TRUE)
 tpa_byplot = tpa(fia_recent,byPlot = TRUE,
                  landType = 'forest',
                  treeType = 'live')
+
+cwd_byplot = dwm(fia_recent, byPlot=TRUE)
+# convert fuel load from us tons/acre to kg/m2
+cwd_byplot = cwd_byplot                       %>% 
+             mutate(CARB_ACRE = CARB_ACRE*tonac_2_kgsqm)
+cwd_byplot = cwd_byplot                 %>% 
+             dplyr::select(YEAR, pltID,
+                PLT_CN,
+                FUEL_TYPE,
+                CARB_ACRE)            %>% 
+             filter(FUEL_TYPE %in% fc_interest)
+
 tpa_bypltsp = tpa(fia_recent,bySpecies = TRUE,
                   byPlot = TRUE,
                   landType = 'forest',
@@ -82,6 +96,7 @@ tpa_bypltsp = tpa_bypltsp               %>%
                      PLT_CN,TPA,BAA)    %>% 
               rename(tpa_sp = TPA,
                      baa_sp = BAA)
+ 
 tpa_df = tpa_byplot %>% left_join(tpa_bypltsp, by=c("YEAR",
                                   "PLT_CN","pltID"))
 tpa_pct = tpa_df                               %>% 
@@ -195,12 +210,13 @@ tree_df = tree_df            %>%
 
 
 
-### also get plot level total basal area for selected plots
+### also get plot level total basal area and fuel info for selected plots
 
 tpa_byplot = filter(tpa_byplot, PLT_CN %in% pltcn)
 tpa_byplot = tpa_byplot                                  %>% 
              mutate(baa_plt = baa_plt*ft2acre_2_m2ha,
                     tpa_plt = tpa_plt / acre_2_ha)
+cwd_byplot = filter(cwd_byplot, PLT_CN %in% pltcn)
 
 tree_df = tree_df %>% left_join(tpa_byplot, by=c("PLT_CN"))
 
@@ -451,6 +467,22 @@ plot_area = 1  #1 ha
 for(p in sequence(nplots)){
   plot_now = unique(wrf_grids$plt_name)[p]
   sz = wrf_grids%>% filter(plt_name==plot_now)
+  fuel_plt = unique(sz$PLT_CN)
+  # calculate mean fuel load by size class
+  # across selected plots
+  fuel = cwd_byplot %>% filter(PLT_CN %in% fuel_plt)
+  sz = sz %>% left_join(fuel,by=c("YEAR","pltID","PLT_CN"),relationship = "many-to-many")
+  mean_fuel = sz                           %>% 
+         dplyr::select(PLT_CN, 
+                       FUEL_TYPE,
+                       CARB_ACRE)    %>% 
+         distinct()                  %>% 
+         group_by(FUEL_TYPE)         %>% 
+         dplyr::select(-PLT_CN)      %>% 
+         summarize_all(mean,na.rm=TRUE)
+  mean_fuel = mean_fuel %>% pivot_wider(names_from = "FUEL_TYPE",
+                                        values_from = "CARB_ACRE")
+  
   plot_name = paste0(unique(sz$lon_f), "_", unique(sz$lat_f))
   sz$status  = "A"
   
@@ -468,19 +500,42 @@ for(p in sequence(nplots)){
   
   
   ### create pss file (patch structure)
-  
-  npatch = length(unique(sz$patch))
-  time   = rep(plot_year, npatch)
-  patch_df = as.data.frame(time)
-  patch_df$patch = seq(npatch)
+  patch_df = sz
+  npatch = length(unique(patch_df$patch))
+  patch_df$patch = as.numeric(sub("FIA_p(\\d+)$", "\\1", patch_df$patch))
+  patch_df = patch_df %>% select(patch,FUEL_TYPE,CARB_ACRE) %>% distinct()
+  patch_df = patch_df %>% pivot_wider(names_from = "FUEL_TYPE", values_from = "CARB_ACRE")
+  sub_fuel = patch_df %>% filter(is.na(LITTER)) %>% dplyr::select(patch)
+  # only if there are patches without fuel data
+  if(nrow(sub_fuel)!=0){
+    sub_fuel = cbind(sub_fuel, mean_fuel)
+    patch_df = rbind(patch_df,sub_fuel) %>% filter(!is.na(LITTER))
+    patch_df = patch_df %>% arrange(patch)
+    # remove NA col
+    patch_df = patch_df %>% dplyr::select(-"NA")
+  }
+
+  patch_df = patch_df                  %>% 
+             rename("h1" = "1HR",
+                    "h10" = "10HR",
+                    "h100" = "100HR",
+                    "h1000" = "1000HR",
+                    "litter" = "LITTER")
+  # devide litter by 3, which is the number of "decomposability" pools in
+  # fine litters in FATES, this value is then assigned to each of the 3 pool
+  # in SPITFIRE, then the sum across the 3 pools are used as leaf litter
+  patch_df = patch_df %>% mutate(litter = litter/3)
+  # add other columns
+  patch_df$time = rep(plot_year, npatch)
   patch_df$trk = rep(2, npatch)
   patch_df$age = rep(0, npatch)
   patch_df$area = rep((1/npatch), npatch)
-  patch_df = patch_df %>% dplyr::select(time,patch, trk, age, area)
+  
+  patch_df = patch_df %>% dplyr::select(time,patch,trk, age, area,litter,h1,h10,h100,h1000)
   write.table(patch_df, file.path(data_path,sprintf('%s_%i.pss',  plot_name, plot_year)), 
               row.names=FALSE, sep = " ")
   ### create css file (cohort structure)
-  co_df = sz
+  co_df = sz %>% dplyr::select(-c(FUEL_TYPE,CARB_ACRE)) %>% distinct()
   co_df$time = plot_year
   co_df$patch = as.numeric(sub("FIA_p(\\d+)$", "\\1", co_df$patch))
   co_df$height = -1
