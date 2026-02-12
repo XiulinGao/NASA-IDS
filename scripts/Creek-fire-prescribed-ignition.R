@@ -6,6 +6,12 @@
 #### Author: Xiulin Gao ####
 #### Date: 2026-02-11 ####
 
+#### Author info ####
+
+author_name = "Xiu-Lin Gao"
+author_email = "xiulingao@lbl.gov"
+
+
 #### Packages ####
 library(ncdf4)
 library(tidyverse)
