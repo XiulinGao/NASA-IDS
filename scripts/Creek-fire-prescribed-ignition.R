@@ -10,6 +10,7 @@
 
 author_name = "Xiu-Lin Gao"
 author_email = "xiulingao@lbl.gov"
+undef = -9999
 
 
 #### Packages ####
@@ -89,7 +90,7 @@ nc_xyt = list   (xx,yy,tt)
 nc_t   = list   (tt)
 xy     = c(dim(xlon)[1],dim(xlon)[2])
 xyt    = c(dim(xlon)[1],dim(xlon)[2],length(time_seq_noleap))
-curent_date = Sys.Date()
+current_date = Sys.Date()
 file_name = paste0("CreekFire-prescribed-ignition-",current_date,".nc")
 file_name = file.path(out_path, file_name)
 nc_vlist        = list()
